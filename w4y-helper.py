@@ -38,6 +38,19 @@ SMTP_PORT: int
 SMTP_USER: str
 SMTP_PASSWORD: str
 
+RE_SPACES = re.compile(r'\s+')
+RE_TAGS = re.compile(r'<!--.*?-->|'
+                     r'<head( [^>]*)?>.*?</head>|'
+                     r'<script( [^>]*)?>.*?</script>|'
+                     r'<style( [^>]*)?>.*?</style>|'
+                     r'<[^>]*>',
+                     re.DOTALL | re.MULTILINE)
+RE_IPV4_NR = re.compile(r'([0-9]{1,2}|1[0-9]{2}|2[12345][0-9]|25[012345])')
+RE_IPV6_NR = re.compile(r'[0-9A-Fa-f]{1,4}')
+RE_IPV4 = re.compile(r'((' + RE_IPV4_NR.pattern + r'\.){3}' + RE_IPV4_NR.pattern + r')')
+RE_IPV6 = re.compile(r'((' + RE_IPV6_NR.pattern + r':){7}' + RE_IPV6_NR.pattern +
+                     r'|(' + RE_IPV6_NR.pattern + r':){1,7}' + r'(:' + RE_IPV6_NR.pattern + '){1,7})')
+
 
 class DnsConfig:
     user: int
@@ -61,6 +74,8 @@ class AddressSource:
     hostname: str
     user: str
     password: str
+    url_v6: str
+    url_v4: str
 
     def __init__(self, name: str, t: str):
         self.name = name
@@ -105,7 +120,7 @@ def cut(base: str, start: str, end: str) -> Optional[str]:
 
 
 def html_clean(string: str) -> str:
-    return re.sub(r'\s+', ' ', re.sub(r'<[^>]*>', ' ', string)).strip()
+    return RE_SPACES.sub(' ', RE_TAGS.sub(' ', string)).strip()
 
 
 def build_ipv6_address(prefix: str, fmt: str):
@@ -170,7 +185,7 @@ def send_email() -> None:
 
 
 def update_dns_records(v4_addr: str, v6_prefix: str) -> None:
-    print('Updating DNS records', flush=True)
+    print(f'Updating DNS records ({v4_addr}, {v6_prefix})', flush=True)
     for dns in DNS_CONFIG:
         print('Logging in...', flush=True)
         api = World4YouApi.MyWorld4You()
@@ -183,10 +198,10 @@ def update_dns_records(v4_addr: str, v6_prefix: str) -> None:
         rrs = {}
         for rr in dns.records_v4:
             rrs[(rr, 'A')] = api.get_resource_record(rr, 'A')
-            print(f'{rr:24} - {rrs[(rr, "A")].value}', flush=True)
+            print(f'{rr:32} - {rrs[(rr, "A")].value}', flush=True)
         for rr in dns.records_v6.keys():
             rrs[(rr, 'AAAA')] = api.get_resource_record(rr, 'AAAA')
-            print(f'{rr:24} - {rrs[(rr, "AAAA")].value}', flush=True)
+            print(f'{rr:32} - {rrs[(rr, "AAAA")].value}', flush=True)
 
         for rr in dns.records_v4:
             if rrs[(rr, 'A')].value != v4_addr:
@@ -233,6 +248,9 @@ def read_config(filename: str) -> None:
             source.hostname = sec['hostname']
             source.user = sec['user']
             source.password = sec['password']
+        elif source.type == 'url':
+            source.url_v4 = sec.get('url_v4', None) or sec['url']
+            source.url_v6 = sec.get('url_v6', None) or sec['url']
         ADDRESS_SOURCES.append(source)
 
     DNS_CONFIG = []
@@ -338,16 +356,50 @@ def status_a1(source: AddressSource) -> Status:
     return stat
 
 
+def status_url(source: AddressSource) -> Status:
+    stat = Status()
+    requests.packages.urllib3.util.connection.HAS_IPV6 = False
+    r1 = requests.get(source.url_v4, headers={'User-Agent': 'Mozilla/5.0'})
+    requests.packages.urllib3.util.connection.HAS_IPV6 = True
+    r2 = requests.get(source.url_v6, headers={'User-Agent': 'Mozilla/5.0'})
+    if r1.status_code != 200 or r2.status_code != 200:
+        return stat
+
+    if 'html' in r1.headers.get('Content-Type', ''):
+        text1 = RE_SPACES.sub(' ', RE_TAGS.sub(' ', r1.text)).strip()
+    else:
+        text1 = r1.text
+
+    if 'html' in r2.headers.get('Content-Type', ''):
+        text2 = RE_SPACES.sub(' ', RE_TAGS.sub(' ', r2.text)).strip()
+    else:
+        text2 = r2.text
+
+    v4 = [m.group(0) for m in RE_IPV4.finditer(text1)]
+    v6 = [m.group(0) for m in RE_IPV6.finditer(text2)]
+
+    if len(v4) > 0:
+        stat.ipv4_address = v4[0]
+
+    if len(v6) > 0:
+        stat.ipv6_prefix = ':'.join(v6[0].split(':')[:4]) + '::/64'
+
+    stat.up = True
+    return stat
+
+
 def get_addresses() -> bool:
     global CURR_ADDRESSES
     statuses = []
     for i, source in enumerate(ADDRESS_SOURCES):
         status = Status()
-        print(f'Getting address fo {source.name} ({source.type})', flush=True)
+        print(f'Getting address of {source.name} ({source.type})', flush=True)
         if source.type == 'fritzbox':
             status = status_fritzbox(source)
         elif source.type == 'a1':
             status = status_a1(source)
+        elif source.type == 'url':
+            status = status_url(source)
         print(f'Status: {status}', flush=True)
         statuses.append(status)
     CURR_ADDRESSES = [(s.ipv4_address, s.ipv6_prefix) for s in statuses]
@@ -369,6 +421,7 @@ def main() -> None:
     print('Starting', flush=True)
     read_cache()
     while True:
+        print(f'Last addresses: {LAST_ADDRESSES}', flush=True)
         if not get_addresses():
             print(f'Waiting for valid ip addresses ({SLEEP_SHORT} sec)', flush=True)
             time.sleep(SLEEP_SHORT)
