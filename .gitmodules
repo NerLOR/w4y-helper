@@ -1,0 +1,3 @@
+[submodule "World4YouApi"]
+	path = World4YouApi
+	url = https://github.com/NerLOR/World4YouApi
