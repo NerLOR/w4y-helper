@@ -254,12 +254,13 @@ def update_firewalls(v4_addr: str, v6_prefix: str) -> None:
         script += "exec\nexit\n"
         print(script, flush=True)
 
-        proc = subprocess.Popen(['ssh', f'{pfsense.user}@{pfsense.hostname}', 'pfSsh.php'],
+        proc = subprocess.Popen(['sshpass', '-p', pfsense.password,
+                                 'ssh', f'{pfsense.user}@{pfsense.hostname}',
+                                 'pfSsh.php'],
                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        proc.stdin.write(pfsense.password.encode('utf-8') + b'\n')
-        proc.stdin.write(script.encode('utf-8'))
-        (stdout, stderr) = proc.communicate()
+        (stdout, stderr) = proc.communicate(script.encode('utf-8'))
         print(stdout, flush=True)
+        print(stderr, flush=True)
 
 
 def read_config(filename: str) -> None:
