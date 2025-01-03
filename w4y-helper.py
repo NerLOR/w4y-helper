@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 from __future__ import annotations
-from typing import Optional, List, Tuple, Dict
+from typing import Optional
 import argparse
 import datetime
 import time
@@ -12,6 +12,7 @@ import hashlib
 import json
 import re
 import hmac
+import subprocess
 from email.mime.text import MIMEText
 import smtplib
 
@@ -23,10 +24,11 @@ HTTP_TIMEOUT: int = 600
 SLEEP: int = 60
 SLEEP_SHORT: int = 5
 
-LAST_ADDRESSES: List[Tuple[Optional[str], Optional[str]]] = []
-CURR_ADDRESSES: List[Tuple[Optional[str], Optional[str]]] = []
-DNS_CONFIG: List[DnsConfig]
-ADDRESS_SOURCES: List[AddressSource]
+LAST_ADDRESSES: list[tuple[Optional[str], Optional[str]]] = []
+CURR_ADDRESSES: list[tuple[Optional[str], Optional[str]]] = []
+DNS_CONFIG: list[DnsConfig]
+PFSENSE_CONFIG: list[PfsenseConfig]
+ADDRESS_SOURCES: list[AddressSource]
 
 EMAIL_FROM: str
 EMAIL_TO: str
@@ -55,10 +57,10 @@ RE_IPV6 = re.compile(r'((' + RE_IPV6_NR.pattern + r':){7}' + RE_IPV6_NR.pattern 
 class DnsConfig:
     user: int
     password: str
-    records_v4: List[str]
-    records_v6: Dict[str, str]
+    records_v4: list[str]
+    records_v6: dict[str, str]
 
-    def __init__(self, user: int, password: str, v4: List[str], v6: Dict[str, str]):
+    def __init__(self, user: int, password: str, v4: list[str], v6: dict[str, str]):
         self.user = user
         self.password = password
         self.records_v4 = v4
@@ -66,6 +68,26 @@ class DnsConfig:
 
     def __str__(self) -> str:
         return f'{{{self.user}}}'
+
+
+class PfsenseConfig:
+    name: str
+    hostname: str
+    user: str
+    password: str
+    virtual_ips: dict[str, str]
+    interfaces: dict[str, str]
+
+    def __init__(self, name: str, hostname: str, user: str, password: str, virtual_ips: dict[str, str], interfaces: dict[str, str]):
+        self.name = name
+        self.hostname = hostname
+        self.user = user
+        self.password = password
+        self.virtual_ips = virtual_ips
+        self.interfaces = interfaces
+
+    def __str__(self) -> str:
+        return f'{{{self.hostname}, {self.user}}}'
 
 
 class AddressSource:
@@ -187,7 +209,7 @@ def send_email() -> None:
 def update_dns_records(v4_addr: str, v6_prefix: str) -> None:
     print(f'Updating DNS records ({v4_addr}, {v6_prefix})', flush=True)
     for dns in DNS_CONFIG:
-        print('Logging in...', flush=True)
+        print(f'Logging in ({dns.user})...', flush=True)
         api = World4YouApi.MyWorld4You()
         if api.login(dns.user, dns.password):
             print('Successfully logged in', flush=True)
@@ -214,8 +236,34 @@ def update_dns_records(v4_addr: str, v6_prefix: str) -> None:
                 api.update_resource_record(rrs[(rr, 'AAAA')], new_value=v6_addr)
 
 
+def update_firewalls(v4_addr: str, v6_prefix: str) -> None:
+    print(f'Updating pfSense instances ({v4_addr}, {v6_prefix})', flush=True)
+    for pfsense in PFSENSE_CONFIG:
+        print(f'Updating {pfsense.name}...', flush=True)
+        script = "parse_config(true);\n"
+        for iface, fmt in pfsense.interfaces.items():
+            script += f"$config['interfaces']['{iface}']['ipaddrv6'] = '{build_ipv6_address(v6_prefix, fmt)}';\n"
+        script += "foreach ($config['virtualip']['vip'] as $nr => $value) {\n"
+        for name, fmt in pfsense.virtual_ips.items():
+            script += f"    if ($value['descr'] === '{name}') $config['virtualip']['vip'][$nr]['subnet'] = '{build_ipv6_address(v6_prefix, fmt)}';\n"
+        script += "}\n"
+        script += "write_config('Automatic IPv6 address update');\n"
+        script += "interface_bring_down('wan', true, $config['interfaces']['wan']);\n"
+        script += "interface_bring_down('wan', false, $config['interfaces']['wan']);\n"
+        script += "interface_configure('wan', true);\n"
+        script += "exec\nexit\n"
+        print(script, flush=True)
+
+        proc = subprocess.Popen(['ssh', f'{pfsense.user}@{pfsense.hostname}', 'pfSsh.php'],
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        proc.stdin.write(pfsense.password.encode('utf-8') + b'\n')
+        proc.stdin.write(script.encode('utf-8'))
+        (stdout, stderr) = proc.communicate()
+        print(stdout, flush=True)
+
+
 def read_config(filename: str) -> None:
-    global DNS_CONFIG, ADDRESS_SOURCES, SLEEP, SLEEP_SHORT, HTTP_TIMEOUT, \
+    global DNS_CONFIG, PFSENSE_CONFIG, ADDRESS_SOURCES, SLEEP, SLEEP_SHORT, HTTP_TIMEOUT, \
         EMAIL_FROM, EMAIL_TO, EMAIL_TRY_SEC, EMAIL_TRY_TIMES, EMAIL_TRY_INTERVAL, \
         SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD
 
@@ -260,6 +308,15 @@ def read_config(filename: str) -> None:
         v6 = {p.strip().split(' ')[0]: p.strip().split(' ')[-1]
               for p in sec.get('records_v6', '').split(',') if len(p.strip()) > 0}
         DNS_CONFIG.append(DnsConfig(int(sec['user']), sec['password'], v4, v6))
+
+    PFSENSE_CONFIG = []
+    for sec_name in [s for s in config.sections() if s.startswith('pfsense.')]:
+        sec = config[sec_name]
+        vips = {' '.join(a.strip().split(' ')[:-1]): a.strip().split(' ')[-1]
+                for a in sec.get('virtual_ips', '').split(',') if len(a.strip()) > 0}
+        ifs = {a.strip().split(' ')[0]: a.strip().split(' ')[-1]
+               for a in sec.get('interfaces', '').split(',') if len(a.strip()) > 0}
+        PFSENSE_CONFIG.append(PfsenseConfig(sec['name'], sec['hostname'], sec['user'], sec['password'], vips, ifs))
 
 
 def status_fritzbox(source: AddressSource) -> Status:
@@ -431,8 +488,11 @@ def main() -> None:
             time.sleep(SLEEP)
             continue
 
+        v4_addr: str = CURR_ADDRESSES[0][0]
+        v6_prefix: str = CURR_ADDRESSES[0][1]
         send_email()
-        update_dns_records(CURR_ADDRESSES[0][0], CURR_ADDRESSES[0][1])
+        update_dns_records(v4_addr, v6_prefix)
+        update_firewalls(v4_addr, v6_prefix)
         LAST_ADDRESSES = CURR_ADDRESSES
         update_cache()
         print('Finished', flush=True)
