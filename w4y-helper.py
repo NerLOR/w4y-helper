@@ -247,6 +247,11 @@ def update_firewalls(v4_addr: str, v6_prefix: str) -> None:
         for name, fmt in pfsense.virtual_ips.items():
             script += f"    if ($value['descr'] === '{name}') $config['virtualip']['vip'][$nr]['subnet'] = '{build_ipv6_address(v6_prefix, fmt)}';\n"
         script += "}\n"
+        suffixes = [a[a.find('}') + 1:] for a in pfsense.interfaces.values()] + [a[a.find('}') + 1:] for a in pfsense.virtual_ips.values()]
+        script += "foreach ($config['nat']['rule'] as $nr => $value) {\n"
+        for suffix in suffixes:
+            script += f"    if ($value['ipprotocol'] === 'inet6' && str_ends_with($value['destination']['address'], '{suffix}')) $config['nat']['rule'][$nr]['destination']['address'] = '{build_ipv6_address(v6_prefix, '{prefix}' + suffix)}';\n"
+        script += "}\n"
         script += "write_config('Automatic IPv6 address update');\n"
         script += "interface_bring_down('wan', true, $config['interfaces']['wan']);\n"
         script += "interface_bring_down('wan', false, $config['interfaces']['wan']);\n"
