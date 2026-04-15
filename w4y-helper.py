@@ -359,6 +359,8 @@ def status_fritzbox(source: AddressSource) -> Status:
         'xhrId': 'all',
         'xhr': 1,
     }, timeout=HTTP_TIMEOUT)
+    if not r.ok:
+        raise RuntimeError('Invalid response')
 
     data = json.loads(r.text)
     cnx = data['data']['connections'][0]
@@ -368,9 +370,13 @@ def status_fritzbox(source: AddressSource) -> Status:
     if address is not None:
         stat.ipv4_address = address
 
-    prefix = cnx['ipv6']['prefix']
-    if prefix is not None:
-        stat.ipv6_prefix = prefix.split(',')[0]
+    r = s.get(f'{url}/api/v0/generic/dhcpv6info', headers={
+        'Authorization': f'AVM-SID {sid}',
+    }, timeout=HTTP_TIMEOUT)
+    if r.ok:
+        data = json.loads(r.text)
+        if len(data['iface']) > 0 and 'prefix' in data['iface'][0]:
+            stat.ipv6_prefix = data['iface'][0]['prefix'] + '/' + data['iface'][0]['prefixlen']
 
     return stat
 
