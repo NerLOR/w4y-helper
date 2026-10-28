@@ -240,7 +240,7 @@ def update_firewalls(v4_addr: str, v6_prefix: str) -> None:
     print(f'Updating pfSense instances ({v4_addr}, {v6_prefix})', flush=True)
     for pfsense in PFSENSE_CONFIG:
         print(f'Updating {pfsense.name}...', flush=True)
-        script = "parse_config(true);\n"
+        script = "config_read_file(true);\n"
         for iface, fmt in pfsense.interfaces.items():
             script += f"config_set_path('interfaces/{iface}/ipaddrv6', '{build_ipv6_address(v6_prefix, fmt)}');\n"
         script += "foreach (config_get_path('virtualip/vip') as $nr => $value) {\n"
