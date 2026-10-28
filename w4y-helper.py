@@ -370,13 +370,13 @@ def status_fritzbox(source: AddressSource) -> Status:
     if address is not None:
         stat.ipv4_address = address
 
-    r = s.get(f'{url}/api/v0/generic/dhcpv6info', headers={
+    r = s.get(f'{url}/api/v0/connections', headers={
         'Authorization': f'AVM-SID {sid}',
     }, timeout=HTTP_TIMEOUT)
     if r.ok:
         data = json.loads(r.text)
-        if len(data['iface']) > 0 and 'prefix' in data['iface'][0]:
-            stat.ipv6_prefix = data['iface'][0]['prefix'] + '/' + data['iface'][0]['prefixlen']
+        if len(data['connection']) > 0 and 'ip6_prefix' in data['connection'][0]:
+            stat.ipv6_prefix = data['connection'][0]['ip6_prefix']
 
     return stat
 
